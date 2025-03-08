@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-// Helper function to pad a string to 10 digits (assuming the ticker is convertible)
-// In practice, you'll likely need to look up the correct CIK for a given ticker.
-function padCIK(ticker: string): string {
-	const num = parseInt(ticker, 10)
-	// If ticker is numeric, pad it; if not, you'll need to map ticker to CIK.
-	return isNaN(num) ? ticker : num.toString().padStart(10, '0')
+// Hardcoded map of ticker symbols to their CIK numbers (as strings)
+const TICKER_TO_CIK: Record<string, string> = {
+	AAPL: '320193',
+	MSFT: '789019',
+	AMZN: '1018724',
+	GOOG: '1652044',
+	TSLA: '1318605',
+}
+
+// Helper function to look up the CIK from a ticker.
+// It returns null if the ticker isn't found in our map.
+function getCIKFromTicker(ticker: string): string | null {
+	const normalized = ticker.toUpperCase()
+	return TICKER_TO_CIK[normalized] ?? null
 }
 
 export async function GET(req: NextRequest) {
@@ -15,15 +23,22 @@ export async function GET(req: NextRequest) {
 		return NextResponse.json({ error: 'Missing stock name' }, { status: 400 })
 	}
 
-	// Convert ticker to CIK format; adjust this mapping as needed
-	const cik = padCIK(ticker)
-	// Build the EDGAR API URL.
-	// This example uses the submissions endpoint.
+	// Get the unpadded CIK from our mapping.
+	const cikUnpadded = getCIKFromTicker(ticker)
+	if (!cikUnpadded) {
+		return NextResponse.json(
+			{ error: 'Unknown ticker', ticker },
+			{ status: 400 }
+		)
+	}
+
+	// Pad the CIK to 10 digits.
+	const cik = cikUnpadded.toString().padStart(10, '0')
 	const edgarUrl = `https://data.sec.gov/submissions/CIK${cik}.json`
 
 	try {
 		const response = await fetch(edgarUrl, {
-			// The SEC requires a proper User-Agent header in your requests.
+			// The SEC requires a proper User-Agent header.
 			headers: {
 				'User-Agent': 'MyAppName (myemail@example.com)', // Replace with your info
 			},

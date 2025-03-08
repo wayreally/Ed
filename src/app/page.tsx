@@ -1,10 +1,13 @@
 'use client'
-
 import React, { useState } from 'react'
+import dynamic from 'next/dynamic'
+
+// Dynamically import ReactJson with SSR disabled
+const ReactJson = dynamic(() => import('react-json-view'), { ssr: false })
 
 export default function Home() {
 	const [input, setInput] = useState('')
-	const [result, setResult] = useState<unknown>(null) // Use 'unknown' instead of 'any'
+	const [result, setResult] = useState<object | null>(null)
 
 	const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
 		e.preventDefault()
@@ -32,9 +35,9 @@ export default function Home() {
 					Submit
 				</button>
 			</form>
-			{result !== null && (
+			{result && (
 				<div className="mt-8 text-white">
-					<pre>{JSON.stringify(result, null, 2)}</pre>
+					<ReactJson src={result} collapsed={false} name={false} />
 				</div>
 			)}
 		</div>
