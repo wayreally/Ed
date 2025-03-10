@@ -1,9 +1,7 @@
 'use client'
 import React, { useState } from 'react'
-import dynamic from 'next/dynamic'
 
 // Dynamically import ReactJson with SSR disabled
-const ReactJson = dynamic(() => import('react-json-view'), { ssr: false })
 
 export default function Home() {
 	const [input, setInput] = useState('')
@@ -37,7 +35,14 @@ export default function Home() {
 			</form>
 			{result && (
 				<div className="mt-8 text-white">
-					<ReactJson src={result} collapsed={false} name={false} />
+					<pre style={{
+						whiteSpace: 'pre-wrap',
+						wordWrap: 'break-word',
+						maxHeight: '500px',
+						overflowY: 'auto'
+					}}>
+						{JSON.stringify(result, null, 2)} </pre>
+
 				</div>
 			)}
 		</div>
