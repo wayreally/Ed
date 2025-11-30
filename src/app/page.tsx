@@ -80,8 +80,16 @@ const centerRow = rows / 2;
 const finalChars = ["W", "A", "Y", "R"];
 const buttonLabels = ["HOME", "ABOUT", "PROJECTS", "CONTACT"];
 
-// Flatten letters for reveal queue
-const buttonLetterQueue = buttonLabels.join("").split("");
+// Randomized reveal letter positions
+const allLetterPositions: Array<{ b: number; j: number }> = [];
+for (let b = 0; b < buttonLabels.length; b++) {
+	for (let j = 0; j < buttonLabels[b].length; j++) {
+		allLetterPositions.push({ b, j });
+	}
+}
+
+// new synchronous reveal cache
+const revealedInstant = buttonLabels.map(label => Array(label.length).fill(0));
 
 // Gaussian helper
 function gaussianRandom(mean = 0, stdev = 1) {
@@ -124,21 +132,19 @@ export default function Page() {
 		}
 	}, [visibleCount, revealOrder.length]);
 
-	// Overlay
+	// Overlay states
 	const [overlayChars, setOverlayChars] = useState(["", "", "", ""]);
 	const [showOverlay, setShowOverlay] = useState(false);
 	const [visibleOverlayCount, setVisibleOverlayCount] = useState(0);
 	const [randomOpacity, setRandomOpacity] = useState([1, 1, 1, 1]);
 	const [finalOpacity, setFinalOpacity] = useState([0, 0, 0, 0]);
 	const [randomAppear, setRandomAppear] = useState([0, 0, 0, 0]);
-
 	const [hasClicked, setHasClicked] = useState(false);
 
-	// Letter-by-letter reveal
+	// Letter states
 	const [revealedLetters, setRevealedLetters] = useState(
 		buttonLabels.map(label => Array(label.length).fill(0))
 	);
-	const letterIndex = useRef(0);
 
 	// Refs
 	const containerRef = useRef<HTMLDivElement | null>(null);
@@ -165,7 +171,7 @@ export default function Page() {
 		setCharSize({ width: charW, height: charH });
 	}, [visibleCount]);
 
-	// Overlay animations
+	// Overlay animations…
 	useEffect(() => {
 		if (visibleCount < revealOrder.length) return;
 		setShowOverlay(true);
@@ -195,7 +201,6 @@ export default function Page() {
 			timers.forEach(t => clearInterval(t));
 			clearInterval(t);
 		};
-
 	}, [visibleCount]);
 
 	useEffect(() => {
@@ -216,6 +221,10 @@ export default function Page() {
 		});
 	}, [showOverlay]);
 
+	// --------------------------------------------------------------------
+	// Waves + Random Letter Reveal
+	// --------------------------------------------------------------------
+
 	function handleEnter() {
 		if (hasClicked) return;
 		[0, 1, 2, 3].forEach(i => {
@@ -226,7 +235,7 @@ export default function Page() {
 			}, delay);
 		});
 	}
-
+	
 	function handleLeave() {
 		if (hasClicked) return;
 		[0, 1, 2, 3].forEach(i => {
@@ -237,13 +246,10 @@ export default function Page() {
 			}, delay);
 		});
 	}
-
-	// --------------------------------------------------------------------
-	// Wave logic + letter reveal
-	// --------------------------------------------------------------------
+	
 
 	function startAsciiWave() {
-
+		let fluidStarted = false;
 		const cont = containerRef.current;
 		const canvas = canvasRef.current;
 		if (!cont || !canvas) return;
@@ -272,13 +278,13 @@ export default function Page() {
 		const thickness = 0.35;
 		const waveCount = 6;
 
-		const baseSpacing = 36;
+		const baseSpacing = 12;
 		let nextWaveAt = baseSpacing + Math.max(0, Math.round(gaussianRandom(10, 4)));
 		let inDoubleDrop = false;
 
 		let waves: Array<{ radius: number; originCol: number; originRow: number }> = [];
 
-		// First wave spawn
+		// spawn first wave
 		const firstSpawn = filledCells[Math.floor(Math.random() * filledCells.length)];
 		waves.push({
 			radius: 0,
@@ -286,127 +292,255 @@ export default function Page() {
 			originRow: firstSpawn.row
 		});
 
-		revealNextLetter();
-
 		canvas.style.opacity = "1";
 
+		// Fixed revealNextLetter: now uses synchronous cache
 		function revealNextLetter() {
-			const idx = letterIndex.current;
-			if (idx >= buttonLetterQueue.length) return;
+			const remaining = allLetterPositions.filter(p => revealedInstant[p.b][p.j] === 0);
+			if (remaining.length === 0) return;
 
-			let remaining = idx;
+			const pick = remaining[Math.floor(Math.random() * remaining.length)];
 
-			for (let b = 0; b < buttonLabels.length; b++) {
-				const label = buttonLabels[b];
+			// sync update
+			revealedInstant[pick.b][pick.j] = 1;
 
-				if (remaining < label.length) {
-					setRevealedLetters(prev => {
-						const c = prev.map(a => [...a]);
-						c[b][remaining] = 1;
-						return c;
-					});
-					break;
-				}
-				remaining -= label.length;
-			}
-
-			letterIndex.current++;
+			// push to React
+			setRevealedLetters(prev => {
+				const c = prev.map(a => [...a]);
+				c[pick.b][pick.j] = 1;
+				return c;
+			});
 		}
+
+		revealNextLetter();
 
 		let frameCounter = 0;
 
 		function frame() {
-
 			const ctx = ctxRef.current;
 			const canvas = canvasRef.current;
 			if (!ctx || !canvas) return;
-
+		
 			ctx.clearRect(0, 0, rect.width, rect.height);
-
+		
 			ctx.save();
 			ctx.beginPath();
 			ctx.rect(startX, startY, asciiW, asciiH);
 			ctx.clip();
-
+		
 			frameCounter++;
-
-			// New wave spawn
-			if (frameCounter >= nextWaveAt && waves.length < waveCount) {
-
-				const spawn = filledCells[Math.floor(Math.random() * filledCells.length)];
-
-				waves.push({
-					radius: 0,
-					originCol: spawn.col,
-					originRow: spawn.row
-				});
-
-				revealNextLetter();
-
-				if (!inDoubleDrop && Math.random() < 0.3) {
-					inDoubleDrop = true;
-					nextWaveAt = frameCounter + 4 + Math.floor(Math.random() * 4);
-					ctx.restore();
-					return requestAnimationFrame(frame);
+		
+			// ----------------------------------------------------
+			// SPAWN NEW WAVE (only while letters remain)
+			// ----------------------------------------------------
+			const remainingLetters = allLetterPositions.filter(
+				p => revealedInstant[p.b][p.j] === 0
+			);
+			const allLettersRevealed = remainingLetters.length === 0;
+		
+			
+			if (!allLettersRevealed) {
+				if (frameCounter >= nextWaveAt && waves.length < waveCount) {
+					const spawn = filledCells[Math.floor(Math.random() * filledCells.length)];
+		
+					waves.push({
+						radius: 0,
+						originCol: spawn.col,
+						originRow: spawn.row
+					});
+		
+					revealNextLetter();
+		
+					if (!inDoubleDrop && Math.random() < 0.3) {
+						inDoubleDrop = true;
+						nextWaveAt = frameCounter + 4 + Math.floor(Math.random() * 4);
+						ctx.restore();
+						return requestAnimationFrame(frame);
+					}
+		
+					inDoubleDrop = false;
+					const gaussianOffset = Math.max(0, Math.round(gaussianRandom(10, 4)));
+					nextWaveAt = frameCounter + baseSpacing + gaussianOffset;
 				}
-
-				inDoubleDrop = false;
-				const gaussianOffset = Math.max(0, Math.round(gaussianRandom(10, 4)));
-				nextWaveAt = frameCounter + baseSpacing + gaussianOffset;
 			}
-
-			// Draw wave rings
+		
+			// ----------------------------------------------------
+			// DRAW WAVES
+			// ----------------------------------------------------
 			for (let w = 0; w < waves.length; w++) {
 				const wave = waves[w];
-
+		
 				let alpha = Math.pow(1 - wave.radius / maxDist, 1.4);
 				if (alpha < 0) alpha = 0;
-
+		
 				for (let row = 0; row < rows; row++) {
 					for (let col = 0; col < cols; col++) {
-
 						if (!asciiMask[row][col]) continue;
-
+		
 						let d = Math.sqrt(
 							(col - wave.originCol) ** 2 +
 							(row - wave.originRow) ** 2
 						);
-
+		
 						const wobble =
 							Math.sin(row * 0.8 + wave.radius * 0.55) * 0.35 +
 							Math.cos(col * 0.6 + wave.radius * 0.45) * 0.35;
-
+		
 						d += wobble;
-
+		
 						if (Math.abs(d - wave.radius) < thickness) {
 							const edge = Math.abs(d - wave.radius) / thickness;
 							const edgeAlpha = Math.max(0, 1 - edge);
-
+		
 							ctx.fillStyle = `rgba(255,255,255,${alpha * edgeAlpha})`;
-
+		
 							const x = startX + col * charW;
 							const y = startY + row * charH;
-
+		
 							ctx.fillRect(x, y, charW + 1, charH + 1);
 						}
 					}
 				}
-
+		
 				wave.radius += 0.55;
+				if (wave.radius > maxDist * 1.1) wave.radius = maxDist * 1.1;
+
+			}
+		
+			ctx.restore();
+		
+			// waves die strictly by radius, ignoring wobble
+			waves = waves.filter(w => w.radius < maxDist * 1.1);
+		
+			// ----------------------------------------------------
+			// WAVES STILL ACTIVE → KEEP RUNNING FRAME()
+			// ----------------------------------------------------
+			if (waves.length > 0) {
+				requestAnimationFrame(frame);
+				return;
+			}
+		
+			// ----------------------------------------------------
+			// NO WAVES LEFT → CHECK LETTERS
+			// ----------------------------------------------------
+`			console.log("remainingLetters", remainingLetters.length, remainingLetters);
+`			
+			if (!allLettersRevealed) {
+				canvas.style.opacity = "0";
+				return;
+			}
+		
+			// ----------------------------------------------------
+			// FLUID MODE (ONLY ONCE)
+			// ----------------------------------------------------
+			canvas.style.opacity = "1";
+		
+			// ------------------------------------------------------------
+			// CONTINUOUS INTERNAL WAVES (like bouncing drops)
+			// ------------------------------------------------------------
+
+			let fluidWaves: Array<{ radius: number; originCol: number; originRow: number }> = [];
+			const FLUID_WAVE_COUNT = 5;     // how many ghost waves exist at once
+			const FLUID_SPEED = 0.22;       // slower than real drops
+			const FLUID_THICKNESS = 0.55;   // more subtle edge width
+
+			// initialize ghost waves
+			for (let i = 0; i < FLUID_WAVE_COUNT; i++) {
+				const spawn = filledCells[Math.floor(Math.random() * filledCells.length)];
+				fluidWaves.push({
+					radius: Math.random() * maxDist,
+					originCol: spawn.col,
+					originRow: spawn.row
+				});
 			}
 
-			ctx.restore();
+			function fluidFrame() {
+				const ctx = ctxRef.current;
+				const canvas = canvasRef.current;
+				if (!ctx || !canvas) return;
 
-			waves = waves.filter(w => w.radius < maxDist + thickness);
+				ctx.clearRect(0, 0, rect.width, rect.height);
 
-			if (waves.length > 0) requestAnimationFrame(frame);
-			else canvas.style.opacity = "0";
+				ctx.save();
+				ctx.beginPath();
+				ctx.rect(startX, startY, asciiW, asciiH);
+				ctx.clip();
+
+				// draw each ghost wave
+				for (let w = 0; w < fluidWaves.length; w++) {
+					const wave = fluidWaves[w];
+
+					// very soft alpha
+					let alpha = Math.pow(1 - wave.radius / maxDist, 1.8) * 0.25; 
+					if (alpha < 0) alpha = 0;
+
+					// draw like original waves, but faint
+					for (let row = 0; row < rows; row++) {
+						for (let col = 0; col < cols; col++) {
+							if (!asciiMask[row][col]) continue;
+
+							let d = Math.sqrt(
+								(col - wave.originCol) ** 2 +
+								(row - wave.originRow) ** 2
+							);
+
+							// use the SAME wobble as the drop effect
+							const wobble =
+								Math.sin(row * 0.8 + wave.radius * 0.55) * 0.45 +
+								Math.cos(col * 0.6 + wave.radius * 0.45) * 0.45;
+
+							d += wobble;
+
+							// soft ring
+							if (Math.abs(d - wave.radius) < FLUID_THICKNESS) {
+								let edge = Math.abs(d - wave.radius) / FLUID_THICKNESS;
+								let edgeAlpha = Math.max(0, 1 - edge);
+
+								// brighten slightly for visibility
+								ctx.fillStyle = `rgba(255,255,255,${alpha * edgeAlpha})`;
+
+								const x = startX + col * charW;
+								const y = startY + row * charH;
+
+								ctx.fillRect(x, y, charW + 1, charH + 1);
+							}
+						}
+					}
+
+					// expand slowly
+					wave.radius += FLUID_SPEED;
+
+					// wrap wave back to center instead of stopping
+					if (wave.radius > maxDist) {
+						const spawn = filledCells[Math.floor(Math.random() * filledCells.length)];
+						wave.radius = 0;
+						wave.originCol = spawn.col;
+						wave.originRow = spawn.row;
+					}
+				}
+
+				ctx.restore();
+				requestAnimationFrame(fluidFrame);
+			}
+
+
+			
+			
+			// IMPORTANT: Start fluid mode exactly once
+			if (!fluidStarted) {
+				fluidStarted = true;
+				requestAnimationFrame(fluidFrame);
+			}
+
+		
+			return;
 		}
+		
 
 		requestAnimationFrame(frame);
 	}
 
-	// Click triggers waves
+	// click triggers waves
 	function handleClick() {
 		if (hasClicked) return;
 		setHasClicked(true);
@@ -427,7 +561,7 @@ export default function Page() {
 		window.setTimeout(() => startAsciiWave(), maxDelay + 100);
 	}
 
-	// Build ASCII
+	// build final ASCII
 	const vis = new Set(revealOrder.slice(0, visibleCount));
 	let revealed = "";
 
@@ -440,7 +574,7 @@ export default function Page() {
 	}
 
 	// --------------------------------------------------------------------
-	// Render
+	// RENDER
 	// --------------------------------------------------------------------
 
 	return (
@@ -453,12 +587,14 @@ export default function Page() {
 			<canvas ref={canvasRef} className="wave-canvas" />
 
 			{showOverlay && !hasClicked && (
-				<div
+					<div
 					className="overlay-chars"
+					style={{ pointerEvents: hasClicked ? "none" : "auto" }}
 					onMouseEnter={handleEnter}
 					onMouseLeave={handleLeave}
 					onClick={handleClick}
 				>
+			
 					{overlayChars.map((rand, i) => {
 						const show = i < visibleOverlayCount;
 						return (
@@ -481,7 +617,6 @@ export default function Page() {
 				</div>
 			)}
 
-			{/* Option A: menu always visible once clicked */}
 			<div
 				className="menu-container"
 				style={{
@@ -538,6 +673,8 @@ export default function Page() {
 					letter-spacing: 1px;
 					white-space: pre;
 					text-align: center;
+					z-index: 1;
+					pointer-events: none;
 				}
 
 				.measure-width {
@@ -559,6 +696,7 @@ export default function Page() {
 					pointer-events: none;
 					opacity: 0;
 					transition: opacity 0.2s linear;
+					z-index: 5;
 				}
 
 				.overlay-chars {
@@ -588,6 +726,7 @@ export default function Page() {
 
 				.menu-container {
 					position: absolute;
+					z-index: 10;
 					bottom: 15%;
 					left: 50%;
 					transform: translateX(-50%);
@@ -596,6 +735,7 @@ export default function Page() {
 				}
 
 				.menu-button {
+					z-index: 10;
 					background: none;
 					border: none;
 					font-size: 20px;
