@@ -59,14 +59,23 @@ const asciiArt = [
 	"                                                                                                    "
 ];
 
-
 const rows = asciiArt.length;
 const cols = Math.max(...asciiArt.map(row => row.length));
 
 const asciiMask = asciiArt.map(r => r.split("").map(ch => ch !== " "));
 
+// Flattened mask for fluid simulation (1 = fluid, 0 = wall)
+const flatMask = new Uint8Array(rows * cols);
+for (let row = 0; row < rows; row++) {
+	for (let col = 0; col < cols; col++) {
+		const idx = row * cols + col;
+		const cell = asciiMask[row][col];
+		flatMask[idx] = cell ? 1 : 0;
+	}
+}
+
 // --------------------------------------------------------------------
-// filledCells — still required for wave spawn + shimmer
+// Filled cells (used for splash spawn locations)
 // --------------------------------------------------------------------
 
 const filledCells: Array<{ col: number; row: number }> = [];
@@ -79,6 +88,8 @@ for (let row = 0; row < rows; row++) {
 	}
 }
 
+// --------------------------------------------------------------------
+// Overlay text + menu
 // --------------------------------------------------------------------
 
 const finalChars = ["W", "A", "Y", "R"];
@@ -93,6 +104,10 @@ for (let b = 0; b < buttonLabels.length; b++) {
 }
 
 const ALL_LETTERS_COUNT = allLetterPositions.length;
+
+// --------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------
 
 function gaussianRandom(mean = 0, stdev = 1) {
 	let u = 0, v = 0;
@@ -115,20 +130,21 @@ function shuffle<T>(arr: T[]): T[] {
 	return a;
 }
 
-type Wave = {
-	radius: number;
-	originCol: number;
-	originRow: number;
-};
+// Wave equation tuning
+const WAVE_STIFFNESS = 0.045;	// how fast waves propagate
+const WAVE_DAMPING = 0.98;		// energy loss per step
+const WAVE_INTENSITY_SCALE = 0.22;	// brightness from height
+const WAVE_ALPHA_THRESHOLD = 0.01;	// skip very small ripples
 
 type AnimState = {
 	started: boolean;
 	frame: number;
-	waves: Wave[];
-	fluidWaves: Wave[];
-	nextWaveFrame: number;
 	lettersRevealed: number;
 	fluidMode: boolean;
+	height: Float32Array | null;
+	velocity: Float32Array | null;
+	heightScratch: Float32Array | null;
+	nextSplashFrame: number;
 };
 
 export default function Page() {
@@ -193,6 +209,46 @@ export default function Page() {
 	useEffect(() => {
 		charSizeRef.current = charSize;
 	}, [charSize]);
+
+	const animRef = useRef<AnimState>({
+		started: false,
+		frame: 0,
+		lettersRevealed: 0,
+		fluidMode: false,
+		height: null,
+		velocity: null,
+		heightScratch: null,
+		nextSplashFrame: 0
+	});
+
+	// Utility to ensure wave buffers exist
+	function ensureWaveBuffers() {
+		const state = animRef.current;
+		const size = rows * cols;
+
+		if (!state.height || state.height.length !== size) {
+			state.height = new Float32Array(size);
+		}
+		if (!state.velocity || state.velocity.length !== size) {
+			state.velocity = new Float32Array(size);
+		}
+		if (!state.heightScratch || state.heightScratch.length !== size) {
+			state.heightScratch = new Float32Array(size);
+		}
+	}
+
+	// Inject a splash into the wave field
+	function injectSplashAt(col: number, row: number, magnitude: number) {
+		const state = animRef.current;
+		if (!state.height || !state.velocity) return;
+
+		if (row < 0 || row >= rows || col < 0 || col >= cols) return;
+
+		const idx = row * cols + col;
+		if (!flatMask[idx]) return;
+
+		state.velocity[idx] += magnitude;
+	}
 
 	// ASCII reveal
 	useEffect(() => {
@@ -325,16 +381,6 @@ export default function Page() {
 		});
 	}, [showOverlay]);
 
-	const animRef = useRef<AnimState>({
-		started: false,
-		frame: 0,
-		waves: [],
-		fluidWaves: [],
-		nextWaveFrame: 0,
-		lettersRevealed: 0,
-		fluidMode: false
-	});
-
 	function revealNextLetter(state: AnimState) {
 		const remaining: Array<{ b: number; j: number }> = [];
 
@@ -345,6 +391,14 @@ export default function Page() {
 
 		if (remaining.length === 0) {
 			state.fluidMode = true;
+            let stiffness = WAVE_STIFFNESS;
+            let damping = WAVE_DAMPING;
+
+            if (state.fluidMode) {
+                // more energetic waves once everything appears
+                stiffness = 0.5;  
+                damping = 0.8;
+            }
 			return;
 		}
 
@@ -358,9 +412,18 @@ export default function Page() {
 				revealedInstant.current[b].slice()
 			)
 		);
+
+		// Link each new letter to a splash in the fluid
+		if (filledCells.length > 0) {
+			const spawn =
+				filledCells[
+					Math.floor(Math.random() * filledCells.length)
+				];
+			injectSplashAt(spawn.col, spawn.row, 0.7);
+		}
 	}
 
-	// Wave animation loop
+	// Wave animation loop (heightmap + reflection)
 	useEffect(() => {
 		let frameId = 0;
 
@@ -404,6 +467,8 @@ export default function Page() {
 				return;
 			}
 
+			ensureWaveBuffers();
+
 			state.frame++;
 
 			const charW = cs.width;
@@ -424,174 +489,169 @@ export default function Page() {
 			ctx.rect(startX, startY, asciiW, asciiH);
 			ctx.clip();
 
-			const maxDist = Math.sqrt(
-				(cols * cols) + (rows * rows)
-			);
-
-			// Spawn highlight waves during menu reveal
-			if (!state.fluidMode && state.lettersRevealed < ALL_LETTERS_COUNT) {
-				if (
-					state.frame >= state.nextWaveFrame &&
-					state.waves.length < 6
-				) {
-					const spawn =
-						filledCells[
-							Math.floor(Math.random() * filledCells.length)
-						];
-
-					state.waves.push({
-						radius: 0,
-						originCol: spawn.col,
-						originRow: spawn.row
-					});
-
-					revealNextLetter(state);
-
-					const base = 12;
-					const gaussian = Math.max(
-						0,
-						Math.round(gaussianRandom(10, 4))
-					);
-
-					state.nextWaveFrame = state.frame + base + gaussian;
+			// ----------------------------------------------------------------
+			// Random idle splashes once fluidMode is active
+			// ----------------------------------------------------------------
+			if (state.fluidMode && state.frame >= state.nextSplashFrame) {
+				if (filledCells.length > 0) {
+					const burstCount = 1 + Math.floor(Math.random() * 3);
+					for (let i = 0; i < burstCount; i++) {
+						const spawn =
+							filledCells[
+								Math.floor(
+									Math.random() * filledCells.length
+								)
+							];
+						const mag = 0.8 + Math.random() * 0.15;
+						injectSplashAt(spawn.col, spawn.row, mag);
+					}
 				}
-			}
 
-			// Highlight waves
-			for (let w = 0; w < state.waves.length; w++) {
-				const wave = state.waves[w];
-				let alpha = Math.pow(
-					1 - wave.radius / maxDist,
-					1.4
+				const baseDelay = 75;
+				const jitter = Math.max(
+					4,
+					Math.round(gaussianRandom(24, 10))
 				);
-				if (alpha < 0) alpha = 0;
+				state.nextSplashFrame = state.frame + baseDelay + jitter;
+			}
 
-				for (let row = 0; row < rows; row++) {
-					for (let col = 0; col < cols; col++) {
-						if (!asciiMask[row][col]) continue;
+			// ----------------------------------------------------------------
+			// Wave equation step with reflection on non-ASCII cells
+			// ----------------------------------------------------------------
+			const height = state.height!;
+			const velocity = state.velocity!;
+			const hNew = state.heightScratch!;
 
-						let d = Math.sqrt(
-							(col - wave.originCol) ** 2 +
-							(row - wave.originRow) ** 2
-						);
+			for (let row = 0; row < rows; row++) {
+				for (let col = 0; col < cols; col++) {
+					const idx = row * cols + col;
 
-						const wob =
-							Math.sin(row * 0.8 + wave.radius * 0.55) * 0.35 +
-							Math.cos(col * 0.6 + wave.radius * 0.45) * 0.35;
+					// Non-ASCII cells act as solid walls (no fluid)
+					if (!flatMask[idx]) {
+						hNew[idx] = 0;
+						velocity[idx] = 0;
+						continue;
+					}
 
-						d += wob;
+					const center = height[idx];
 
-						const thick = 0.35;
+					let sum = 0;
+					let count = 0;
 
-						if (Math.abs(d - wave.radius) < thick) {
-							const edge = Math.abs(d - wave.radius) / thick;
-
-							const edgeAlpha = Math.max(0, 1 - edge);
-
-							ctx.fillStyle = `rgba(255,255,255,${
-								alpha * edgeAlpha
-							})`;
-
-							const x = startX + col * charW;
-							const y = startY + row * charH;
-
-							ctx.fillRect(x, y, charW + 1, charH + 1);
+					// Up
+					if (row > 0) {
+						const nIdx = (row - 1) * cols + col;
+						if (flatMask[nIdx]) {
+							sum += height[nIdx];
+						} else {
+							sum += center;
 						}
+					} else {
+						sum += center;
 					}
-				}
+					count++;
 
-				wave.radius += 0.55;
-			}
-
-			state.waves = state.waves.filter(
-				w => w.radius < maxDist * 1.1
-			);
-
-			if (state.lettersRevealed >= ALL_LETTERS_COUNT) {
-				state.fluidMode = true;
-			}
-
-			// Fluid shimmer waves (idle mode)
-			if (state.fluidMode) {
-				if (state.fluidWaves.length === 0) {
-					const count = 5;
-					for (let i = 0; i < count; i++) {
-						const spawn =
-							filledCells[
-								Math.floor(
-									Math.random() * filledCells.length
-								)
-							];
-						state.fluidWaves.push({
-							radius: Math.random() * maxDist,
-							originCol: spawn.col,
-							originRow: spawn.row
-						});
-					}
-				}
-
-				const SPEED = 0.22;
-				const THICK = 0.55;
-
-				for (let w = 0; w < state.fluidWaves.length; w++) {
-					const wave = state.fluidWaves[w];
-
-					let alpha =
-						Math.pow(1 - wave.radius / maxDist, 1.8) * 0.25;
-
-					if (alpha < 0) alpha = 0;
-
-					for (let row = 0; row < rows; row++) {
-						for (let col = 0; col < cols; col++) {
-							if (!asciiMask[row][col]) continue;
-
-							let d = Math.sqrt(
-								(col - wave.originCol) ** 2 +
-								(row - wave.originRow) ** 2
-							);
-
-							const wob =
-								Math.sin(row * 0.8 + wave.radius * 0.55) *
-									0.45 +
-								Math.cos(col * 0.6 + wave.radius * 0.45) *
-									0.45;
-
-							d += wob;
-
-							if (Math.abs(d - wave.radius) < THICK) {
-								const edge = Math.abs(d - wave.radius) / THICK;
-
-								const edgeAlpha =
-									Math.max(0, 1 - edge);
-
-								ctx.fillStyle = `rgba(255,255,255,${
-									alpha * edgeAlpha
-								})`;
-
-								const x = startX + col * charW;
-								const y = startY + row * charH;
-
-								ctx.fillRect(x, y, charW + 1, charH + 1);
-							}
+					// Down
+					if (row < rows - 1) {
+						const nIdx = (row + 1) * cols + col;
+						if (flatMask[nIdx]) {
+							sum += height[nIdx];
+						} else {
+							sum += center;
 						}
+					} else {
+						sum += center;
 					}
+					count++;
 
-					wave.radius += SPEED;
-
-					if (wave.radius > maxDist) {
-						const spawn =
-							filledCells[
-								Math.floor(
-									Math.random() * filledCells.length
-								)
-							];
-
-						wave.radius = 0;
-						wave.originCol = spawn.col;
-						wave.originRow = spawn.row;
+					// Left
+					if (col > 0) {
+						const nIdx = row * cols + (col - 1);
+						if (flatMask[nIdx]) {
+							sum += height[nIdx];
+						} else {
+							sum += center;
+						}
+					} else {
+						sum += center;
 					}
+					count++;
+
+					// Right
+					if (col < cols - 1) {
+						const nIdx = row * cols + (col + 1);
+						if (flatMask[nIdx]) {
+							sum += height[nIdx];
+						} else {
+							sum += center;
+						}
+					} else {
+						sum += center;
+					}
+					count++;
+
+					const neighborAvg = sum / count;
+					const laplacian = neighborAvg - center;
+                    let stiffness = WAVE_STIFFNESS;
+                    let damping = WAVE_DAMPING;
+					let v = velocity[idx] + laplacian * stiffness;
+                    v *= damping;
+
+                    
+                    if (v > 1.25) v = 1.25;
+                    if (v < -1.25) v = -1.25;
+
+					const hVal = center + v;
+
+                    let hClamped = hVal;
+                    if (hClamped > 0.8) hClamped = 0.8;
+                    if (hClamped < -0.8) hClamped = -0.8;
+
+                    hNew[idx] = hClamped;
+
+
+					velocity[idx] = v;
+					hNew[idx] = hVal;
 				}
 			}
+
+			// Swap buffers
+			state.height = hNew;
+			state.heightScratch = height;
+
+			const activeHeight = state.height!;
+
+			// ----------------------------------------------------------------
+			// Render highlight intensity from wave height
+			// ----------------------------------------------------------------
+			for (let row = 0; row < rows; row++) {
+                for (let col = 0; col < cols; col++) {
+                    const idx = row * cols + col;
+                    if (!flatMask[idx]) continue;
+
+                    const x = startX + col * charW;
+                    const y = startY + row * charH;
+
+                    // get local wave velocity instead of height
+                    const v = velocity[idx];
+
+                    // only show sharp wave peaks
+                    if (state.fluidMode) {
+                        if (v > 0.03 && v <0.08) {
+                        ctx.fillStyle = "rgba(255,255,255,1)";
+                        ctx.fillRect(x, y, charW, charH);
+                    }
+                    }
+                    if (!state.fluidMode) {
+                        if (v > 0.03) {
+                        ctx.fillStyle = "rgba(255,255,255,1)";
+                        ctx.fillRect(x, y, charW, charH);
+                    }
+                    }
+                    
+                }
+            }
+
 
 			ctx.restore();
 
@@ -602,41 +662,75 @@ export default function Page() {
 		return () => cancelAnimationFrame(frameId);
 	}, []);
 
+    function scheduleMenuReveal() {
+	const state = animRef.current;
+
+	if (state.lettersRevealed >= ALL_LETTERS_COUNT) {
+		// when all letters are shown, go into idle/shimmer mode
+		state.fluidMode = true;
+		return;
+	}
+
+	// reveal one random letter
+	revealNextLetter(state);
+
+	// schedule the next letter reveal
+	const delay = 80 + Math.random() * 90;
+	window.setTimeout(scheduleMenuReveal, delay);
+}
+
+
 	function handleClick() {
-		if (hasClicked) return;
-		setHasClicked(true);
+	if (hasClicked) return;
+	setHasClicked(true);
 
-		const state = animRef.current;
+	const state = animRef.current;
 
-		if (!state.started) {
-			state.started = true;
-			state.frame = 0;
-			state.waves = [];
-			state.fluidWaves = [];
-			state.nextWaveFrame = 0;
-			state.lettersRevealed = 0;
-			state.fluidMode = false;
+	if (!state.started) {
+		state.started = true;
+
+		// begin with a single splash at click time
+		if (filledCells.length) {
+			const p = filledCells[Math.floor(Math.random() * filledCells.length)];
+			injectSplashAt(p.col, p.row, 0.7);
 		}
 
-		wavesStartedRef.current = true;
+		state.frame = 0;
+		state.lettersRevealed = 0;			// <— restore reveal-from-zero
+		state.fluidMode = false;			// <— only after all letters appear
+		state.nextSplashFrame = 0;
 
-		[0, 1, 2, 3].forEach(i => {
-			const d = 200 + Math.random() * 300;
+		ensureWaveBuffers();
+		if (state.height && state.velocity) {
+			state.height.fill(0);
+			state.velocity.fill(0);
+		}
 
-			window.setTimeout(() => {
-				setFinalOpacity(o => {
-					const c = [...o];
-					c[i] = 0;
-					return c;
-				});
-				setRandomOpacity(o => {
-					const c = [...o];
-					c[i] = 0;
-					return c;
-				});
-			}, d);
-		});
+		// kick off the old random reveal sequence
+		scheduleMenuReveal();				// <— this was missing
 	}
+
+	wavesStartedRef.current = true;
+
+	// Fade WAYR chars
+	[0, 1, 2, 3].forEach(i => {
+		const d = 200 + Math.random() * 300;
+		window.setTimeout(() => {
+			setFinalOpacity(o => {
+				const c = [...o];
+				c[i] = 0;
+				return c;
+			});
+			setRandomOpacity(o => {
+				const c = [...o];
+				c[i] = 0;
+				return c;
+			});
+		}, d);
+	});
+}
+
+
 
 	type ExitItem =
 		| { type: "ascii"; i: number }
@@ -801,9 +895,9 @@ export default function Page() {
 			>
 				{buttonLabels.map((label, i) => {
 					let target = "/home";
-					if	(label === "ABOUT")	target = "/about";
-					else if (label === "PROJECTS")	target = "/projects";
-					else if (label === "CONTACT")	target = "/contact";
+					if (label === "ABOUT") target = "/about";
+					else if (label === "PROJECTS") target = "/projects";
+					else if (label === "CONTACT") target = "/contact";
 
 					return (
 						<button
@@ -850,9 +944,10 @@ export default function Page() {
 
 				.ascii-art {
 					font-family: "Fira Code", monospace;
+                    letter-spacing: 1px;
 					font-size: 10px;
 					line-height: 1.1;
-					color: rgba(37, 37, 37, 1);
+					color: rgba(99, 99, 99, 1);
 					white-space: pre;
 					text-align: center;
 					z-index: 1;
@@ -893,17 +988,15 @@ export default function Page() {
 					height: 42px;
 				}
 
-
 				.overlay-char {
 					font-family: "Instrument Serif", serif;
 					font-size: 40px;
 					color: black;
-					position: absolute; /* keep this so random vs final can overlap */
+					position: absolute;
 					left: 50%;
 					top: 50%;
-					transform: translate(-50%, -50%); /* center perfectly */
+					transform: translate(-50%, -50%);
 				}
-
 
 				.menu-container {
 					position: absolute;
