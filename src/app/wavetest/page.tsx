@@ -1,3 +1,4 @@
+/* eslint-disable */
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -65,6 +66,7 @@ const cols = Math.max(...asciiArt.map(row => row.length));
 const asciiMask = asciiArt.map(r => r.split("").map(ch => ch !== " "));
 
 // Flattened mask for fluid simulation (1 = fluid, 0 = wall)
+
 const flatMask = new Uint8Array(rows * cols);
 for (let row = 0; row < rows; row++) {
 	for (let col = 0; col < cols; col++) {
@@ -133,8 +135,8 @@ function shuffle<T>(arr: T[]): T[] {
 // Wave equation tuning
 const WAVE_STIFFNESS = 0.045;	// how fast waves propagate
 const WAVE_DAMPING = 0.98;		// energy loss per step
-const WAVE_INTENSITY_SCALE = 0.22;	// brightness from height
-const WAVE_ALPHA_THRESHOLD = 0.01;	// skip very small ripples
+//const WAVE_INTENSITY_SCALE = 0.22;	// brightness from height
+//const WAVE_ALPHA_THRESHOLD = 0.01;	// skip very small ripples
 
 type AnimState = {
 	started: boolean;
@@ -145,6 +147,10 @@ type AnimState = {
 	velocity: Float32Array | null;
 	heightScratch: Float32Array | null;
 	nextSplashFrame: number;
+	hasFiredFinalSplash: boolean;
+	idleSplashesEnabled: boolean;
+	dampingLockedHigh: boolean;
+
 };
 
 export default function Page() {
@@ -218,7 +224,12 @@ export default function Page() {
 		height: null,
 		velocity: null,
 		heightScratch: null,
-		nextSplashFrame: 0
+		nextSplashFrame: 0,
+		hasFiredFinalSplash: false,
+		idleSplashesEnabled: true,
+		dampingLockedHigh: false,
+
+
 	});
 
 	// Utility to ensure wave buffers exist
@@ -389,18 +400,35 @@ export default function Page() {
 			if (revealedInstant.current[p.b][p.j] === 0) remaining.push(p);
 		}
 
+		let damping = WAVE_DAMPING;
+
+		// only switch to infinite reflection AFTER the final splash spawned
+		if (state.dampingLockedHigh) {
+			damping = 1;
+		}
+
 		if (remaining.length === 0) {
 			state.fluidMode = true;
-            let stiffness = WAVE_STIFFNESS;
-            let damping = WAVE_DAMPING;
 
-            if (state.fluidMode) {
-                // more energetic waves once everything appears
-                stiffness = 0.5;  
-                damping = 0.8;
-            }
+			if (!state.hasFiredFinalSplash) {
+				state.hasFiredFinalSplash = true;
+				state.idleSplashesEnabled = false;
+
+				if (filledCells.length > 0) {
+					const p = filledCells[Math.floor(Math.random() * filledCells.length)];
+					injectSplashAt(p.col, p.row, 1.0); // strong final splash
+				}
+
+				// delay the infinite-reflection mode until AFTER the splash starts propagating
+				requestAnimationFrame(() => {
+					state.dampingLockedHigh = true;
+				});
+			}
+
 			return;
 		}
+
+
 
 		const pick = remaining[Math.floor(Math.random() * remaining.length)];
 
@@ -492,7 +520,8 @@ export default function Page() {
 			// ----------------------------------------------------------------
 			// Random idle splashes once fluidMode is active
 			// ----------------------------------------------------------------
-			if (state.fluidMode && state.frame >= state.nextSplashFrame) {
+			`if (state.fluidMode && state.idleSplashesEnabled && state.frame >= state.nextSplashFrame) {
+
 				if (filledCells.length > 0) {
 					const burstCount = 1 + Math.floor(Math.random() * 3);
 					for (let i = 0; i < burstCount; i++) {
@@ -513,7 +542,7 @@ export default function Page() {
 					Math.round(gaussianRandom(24, 10))
 				);
 				state.nextSplashFrame = state.frame + baseDelay + jitter;
-			}
+			}`
 
 			// ----------------------------------------------------------------
 			// Wave equation step with reflection on non-ASCII cells
@@ -619,7 +648,7 @@ export default function Page() {
 			state.height = hNew;
 			state.heightScratch = height;
 
-			const activeHeight = state.height!;
+			//const activeHeight = state.height!;
 
 			// ----------------------------------------------------------------
 			// Render highlight intensity from wave height
@@ -922,6 +951,7 @@ export default function Page() {
 			</div>
 
 			<style jsx>{`
+				body,
 				.ascii-container,
 				.ascii-art,
 				.wave-canvas,
@@ -933,12 +963,13 @@ export default function Page() {
 					user-select: none;
 				}
 
+
 				.ascii-container {
 					min-height: 100vh;
 					display: flex;
 					align-items: center;
 					justify-content: center;
-					background: #fff;
+					background: #050608;
 					position: relative;
 				}
 
@@ -947,7 +978,7 @@ export default function Page() {
                     letter-spacing: 1px;
 					font-size: 10px;
 					line-height: 1.1;
-					color: rgba(99, 99, 99, 1);
+					color: rgba(255, 255, 255, 1);
 					white-space: pre;
 					text-align: center;
 					z-index: 1;
@@ -980,6 +1011,7 @@ export default function Page() {
 					gap: 24px;
 					cursor: pointer;
 					position: absolute;
+					z-index: 2
 				}
 
 				.char-wrap {
@@ -991,7 +1023,7 @@ export default function Page() {
 				.overlay-char {
 					font-family: "Instrument Serif", serif;
 					font-size: 40px;
-					color: black;
+					color: rgba(255, 255, 255, 1);
 					position: absolute;
 					left: 50%;
 					top: 50%;
@@ -1013,7 +1045,7 @@ export default function Page() {
 					border: none;
 					font-size: 20px;
 					cursor: pointer;
-					color: black;
+					color: white;
 				}
 			`}</style>
 		</div>
